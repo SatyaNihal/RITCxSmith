@@ -1,0 +1,178 @@
+{
+ "case": {
+  "name": "RITC - Algorithmic ETF Arbitrage (synthetic)",
+  "period": 1,
+  "tick": 10,
+  "ticks_per_period": 300,
+  "total_periods": 1,
+  "status": "ACTIVE"
+ },
+ "books": {
+  "RITC": {
+   "bids": [
+    {
+     "price": 24.98,
+     "quantity": 1000000,
+     "quantity_filled": 0
+    }
+   ],
+   "asks": [
+    {
+     "price": 25.0,
+     "quantity": 200,
+     "quantity_filled": 0
+    },
+    {
+     "price": 25.16,
+     "quantity": 400,
+     "quantity_filled": 0
+    }
+   ]
+  },
+  "BULL": {
+   "bids": [
+    {
+     "price": 13.99,
+     "quantity": 1000000,
+     "quantity_filled": 0
+    }
+   ],
+   "asks": [
+    {
+     "price": 14.01,
+     "quantity": 1000000,
+     "quantity_filled": 0
+    }
+   ]
+  },
+  "BEAR": {
+   "bids": [
+    {
+     "price": 20.99,
+     "quantity": 1000000,
+     "quantity_filled": 0
+    }
+   ],
+   "asks": [
+    {
+     "price": 21.01,
+     "quantity": 1000000,
+     "quantity_filled": 0
+    }
+   ]
+  },
+  "USD": {
+   "bids": [
+    {
+     "price": 1.3999,
+     "quantity": 100000000,
+     "quantity_filled": 0
+    }
+   ],
+   "asks": [
+    {
+     "price": 1.4001,
+     "quantity": 100000000,
+     "quantity_filled": 0
+    }
+   ]
+  }
+ },
+ "securities": [
+  {
+   "ticker": "CAD",
+   "position": 0.0,
+   "currency": "CAD",
+   "trading_fee": 0.0,
+   "limit_order_rebate": 0.0,
+   "max_trade_size": 2500000,
+   "quoted_decimals": 4,
+   "is_tradeable": true
+  },
+  {
+   "ticker": "USD",
+   "position": 0.0,
+   "currency": "CAD",
+   "trading_fee": 0.0,
+   "limit_order_rebate": 0.0,
+   "max_trade_size": 2500000,
+   "quoted_decimals": 4,
+   "is_tradeable": true
+  },
+  {
+   "ticker": "BULL",
+   "position": 0.0,
+   "currency": "CAD",
+   "trading_fee": 0.02,
+   "limit_order_rebate": 0.01,
+   "max_trade_size": 10000,
+   "quoted_decimals": 2,
+   "is_tradeable": true,
+   "limits": [
+    {
+     "name": "LIMIT-STOCK",
+     "units": 1.0
+    }
+   ]
+  },
+  {
+   "ticker": "BEAR",
+   "position": 0.0,
+   "currency": "CAD",
+   "trading_fee": 0.02,
+   "limit_order_rebate": 0.01,
+   "max_trade_size": 10000,
+   "quoted_decimals": 2,
+   "is_tradeable": true,
+   "limits": [
+    {
+     "name": "LIMIT-STOCK",
+     "units": 1.0
+    }
+   ]
+  },
+  {
+   "ticker": "RITC",
+   "position": 0.0,
+   "currency": "USD",
+   "trading_fee": 0.02,
+   "limit_order_rebate": 0.01,
+   "max_trade_size": 10000,
+   "quoted_decimals": 2,
+   "is_tradeable": true,
+   "limits": [
+    {
+     "name": "LIMIT-STOCK",
+     "units": 2.0
+    }
+   ]
+  }
+ ],
+ "limits": [
+  {
+   "name": "LIMIT-STOCK",
+   "gross": 0.0,
+   "net": 0.0,
+   "gross_limit": 250000,
+   "net_limit": 100000,
+   "gross_fine": 0,
+   "net_fine": 0
+  }
+ ],
+ "tenders": [
+  {
+   "tender_id": 1,
+   "period": 1,
+   "tick": 10,
+   "expires": 40,
+   "caption": "Tender 1",
+   "quantity": 600,
+   "action": "SELL",
+   "is_fixed_bid": true,
+   "price": 25.1
+  }
+ ],
+ "orders": [],
+ "started_at": 1000.0,
+ "finished_at": 1000.2
+}
