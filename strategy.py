@@ -489,30 +489,80 @@ def evaluate_tender(tender: Tender, snap: Snapshot, cfg: StrategyConfig) -> Deci
     target = hedge_target(positions)
     exit_quantity = target - new_position
     after_value, after_fill, after_fee = trade_value(snap, ETF, exit_quantity)
-    if not after_fill.complete:
-        cut_off = snap.books[ETF].truncated("BUY" if exit_quantity > 0 else "SELL")
-        return skip(
-            f"exit book covers only {after_fill.filled:,.0f} of {abs(exit_quantity):,.0f} RITC "
-            f"(worst visible {after_fill.worst_price})"
-            + ("; RIT cut the book off at the request limit, so raise book_depth" if cut_off else "")
-        )
     before_value, _, before_fee = trade_value(snap, ETF, target - position)
-
     currency = snap.currency(ETF)
-    tender_cash = -delta * tender.price
-    incremental = tender_cash + after_value - before_value
-    incremental_cad = to_cad(snap, incremental, currency)
-    fees_cad = cost_in_cad(snap, after_fee - before_fee, currency)
     buffer_cad = cfg.tender_buffer_per_unit_cad * abs(delta)
-    net_cad = incremental_cad - buffer_cad
-    per_unit = net_cad / abs(delta)
+    side = "sell" if delta < 0 else "buy"
 
+    # Fair value of RITC from the stocks: (BULL + BEAR) / USD, all at mids.
     stocks = [snap.books[ticker].mid for ticker in STOCKS if ticker in snap.books]
     fx_mid = snap.books[FX].mid
     fair = sum(stocks) / fx_mid if len(stocks) == 2 and None not in stocks and fx_mid else None
     fair_edge = None if fair is None else (tender.price - fair if delta < 0 else fair - tender.price)
+    fair_net_cad = None
+    if fair_edge is not None:
+        fair_net_cad = to_cad(snap, (fair_edge - snap.fee(ETF)) * abs(delta), currency) - buffer_cad
+    fair_ok = (
+        cfg.tender_fair_edge_min is not None
+        and fair_edge is not None
+        and fair_edge >= cfg.tender_fair_edge_min
+        and snap.ticks_left >= cfg.tender_fair_min_ticks_left
+    )
+    fair_text = f"; basket fair {fair:.3f} ({fair_edge:+.3f}/unit)" if fair is not None else ""
 
-    side = "sell" if delta < 0 else "buy"
+    def accept_on_fair_value(why_not_now: str, details: dict) -> Decision:
+        reason = (
+            f"fair value: {side} {abs(delta):,.0f} @ {tender.price:.2f} beats basket fair {fair:.3f} by "
+            f"{fair_edge:+.3f}/unit (>= {cfg.tender_fair_edge_min:.2f}), est {fair_net_cad:+,.0f} CAD after "
+            f"fee and buffer if RITC returns to fair; {why_not_now}, so unwind over time"
+        )
+        return Decision("tender", name, True, tender.quantity, fair_net_cad, reason, legs, details)
+
+    legs: tuple[Leg, ...] = ()
+    if abs(exit_quantity) > EPS:
+        legs = (
+            Leg(ETF, "BUY" if exit_quantity > 0 else "SELL", abs(exit_quantity), after_fill.vwap, after_fill.worst_price),
+        )
+    base_details = {
+        "delta": delta,
+        "position": position,
+        "target": target,
+        "exit_quantity": exit_quantity,
+        "exit_vwap": after_fill.vwap,
+        "exit_worst": after_fill.worst_price,
+        "fair": fair,
+        "fair_edge": fair_edge,
+        "fair_net_cad": fair_net_cad,
+    }
+    # Value the newly opened shares separately from savings on the old unwind.
+    old_residual = position - target
+    new_residual = new_position - target
+    if old_residual * new_residual < 0:
+        excess = abs(new_residual)
+        excess_net = to_cad(snap, after_value - new_residual * tender.price, currency) - cfg.tender_buffer_per_unit_cad * excess
+        book_pays = after_fill.complete and excess_net >= max(cfg.min_tender_profit_cad, cfg.min_tender_edge_per_unit_cad * excess)
+        fair_pays = fair_ok and fair_edge >= cfg.reversal_fair_edge_min
+        base_details.update(reversal_net_cad=excess_net, reversal_eligible=book_pays or fair_pays)
+
+    if not after_fill.complete:
+        cut_off = snap.books[ETF].truncated("BUY" if exit_quantity > 0 else "SELL")
+        depth_text = (
+            f"exit book covers only {after_fill.filled:,.0f} of {abs(exit_quantity):,.0f} RITC "
+            f"(worst visible {after_fill.worst_price})"
+            + ("; RIT cut the book off at the request limit, so raise book_depth" if cut_off else "")
+        )
+        details = {**base_details, "net_cad": fair_net_cad if fair_ok else None}
+        if fair_ok:
+            return accept_on_fair_value(depth_text, details)
+        return skip(depth_text + fair_text, **details)
+
+    tender_cash = -delta * tender.price
+    incremental = tender_cash + after_value - before_value
+    incremental_cad = to_cad(snap, incremental, currency)
+    fees_cad = cost_in_cad(snap, after_fee - before_fee, currency)
+    net_cad = incremental_cad - buffer_cad
+    per_unit = net_cad / abs(delta)
+
     if abs(exit_quantity) > EPS:
         exit_text = (
             f"{'buy back' if exit_quantity > 0 else 'sell'} {abs(exit_quantity):,.0f} at VWAP "
@@ -520,34 +570,24 @@ def evaluate_tender(tender: Tender, snap: Snapshot, cfg: StrategyConfig) -> Deci
         )
     else:
         exit_text = "offsets the current position (no exit needed)"
-    fair_text = f"; basket fair {fair:.3f} ({fair_edge:+.3f}/unit)" if fair is not None else ""
     estimate = (
         f"{side} {abs(delta):,.0f} @ {tender.price:.2f}, {exit_text}: est {net_cad:+,.0f} CAD "
         f"({per_unit:+.4f}/unit) after fees {fees_cad:,.0f} and buffer {buffer_cad:,.0f}{fair_text}"
     )
     details = {
-        "delta": delta,
-        "position": position,
-        "target": target,
-        "exit_quantity": exit_quantity,
-        "exit_vwap": after_fill.vwap,
-        "exit_worst": after_fill.worst_price,
+        **base_details,
         "incremental_quote": incremental,
         "fees_cad": fees_cad,
         "buffer_cad": buffer_cad,
         "net_cad": net_cad,
-        "fair": fair,
     }
     if net_cad < cfg.min_tender_profit_cad or per_unit < cfg.min_tender_edge_per_unit_cad:
+        if fair_ok:
+            return accept_on_fair_value(f"an immediate full exit would make {net_cad:+,.0f} CAD", details)
         return skip(
             f"{estimate}; needs >= {cfg.min_tender_profit_cad:,.0f} CAD and "
             f">= {cfg.min_tender_edge_per_unit_cad:.3f}/unit",
             **details,
-        )
-    legs = ()
-    if abs(exit_quantity) > EPS:
-        legs = (
-            Leg(ETF, "BUY" if exit_quantity > 0 else "SELL", abs(exit_quantity), after_fill.vwap, after_fill.worst_price),
         )
     return Decision("tender", name, True, tender.quantity, net_cad, estimate, legs, details)
 
@@ -586,6 +626,18 @@ def unwind_step(
     fill = sweep_book(book.levels_for(action), want, limit_price=limit, buying=action == "BUY")
     quantity = math.floor(fill.filled)
     if quantity < 1:
+        if ticks_since_progress >= 3 and book.best_bid is not None and book.best_ask is not None:
+            decimals = snap.securities[ETF].quoted_decimals
+            scale = 10 ** (2 if decimals is None else decimals)
+            bid, ask = round(book.best_bid * scale), round(book.best_ask * scale)
+            if action == "SELL":
+                price_ticks = max(bid + 1, ask - 1, math.ceil(limit * scale - EPS))
+            else:
+                price_ticks = min(ask - 1, bid + 1, math.floor(limit * scale + EPS))
+            passive_qty = math.floor(min(want, cfg.unwind_passive_max))
+            if bid <= price_ticks <= ask and bid < ask and passive_qty > 0:
+                price = price_ticks / scale
+                return Leg(ETF, action, passive_qty, None, price), f"post {action} {passive_qty:,} at {price} inside or at the spread"
         best = book.best_bid if action == "SELL" else book.best_ask
         side = "bid" if action == "SELL" else "ask"
         return None, f"waiting: best {side} {best} is past the {limit:.2f} limit ({residual:+,.0f} left)"

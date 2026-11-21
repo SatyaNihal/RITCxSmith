@@ -106,8 +106,37 @@ class NewsTests(unittest.TestCase):
     def test_decimal_and_irrelevant_text(self):
         self.assertAlmostEqual(vm.parse_vol_news("Volatility for this week will be 22.5%").value, 0.225)
         self.assertIsNone(vm.parse_vol_news("RTM rallies 3% on earnings"))
-        self.assertIsNone(vm.parse_vol_news("The realized volatility will be 20%"))  # no week stated
         self.assertIsNone(vm.parse_vol_news(""))
+        self.assertIsNone(vm.parse_rate_news("RTM rallies 3% on earnings"))
+
+    def test_no_week_stated_counts_as_current(self):
+        news = vm.parse_vol_news("The realized volatility will be 20%")
+        self.assertEqual((news.kind, news.value), ("current", 0.20))
+
+    def test_competition_day_headline_with_rate_first(self):
+        # Tick 1 news on the competition server (headline + body, joined as vol_tool does).
+        for body in (
+            "The current risk free rate is 0% and the current annualized volatility is 25%.",
+            "The risk free rate is 0.00% and the annualized realized volatility of RTM is 25%",
+            "The annualized volatility of RTM is 25% and the risk-free rate is 0%.",
+        ):
+            text = "Risk free rate and current annualized volatility of RTM " + body
+            with self.subTest(body=body):
+                news = vm.parse_vol_news(text)
+                self.assertEqual(news.kind, "current")
+                self.assertAlmostEqual(news.value, 0.25)  # not the 0% rate
+                self.assertEqual(vm.parse_rate_news(text), 0.0)
+
+    def test_rate_words_inside_other_words_are_ignored(self):
+        news = vm.parse_vol_news("Volatility will stay moderate at 22% this week")
+        self.assertAlmostEqual(news.value, 0.22)
+        self.assertIsNone(vm.parse_rate_news("Volatility will stay moderate at 22% this week"))
+
+    def test_next_week_range_after_a_current_figure(self):
+        news = vm.parse_vol_news("Analysts expect the annualized volatility for next week to be between 20% and 25%")
+        self.assertEqual(news.kind, "next")
+        self.assertAlmostEqual(news.low, 0.20)
+        self.assertAlmostEqual(news.high, 0.25)
 
 
 class VolScheduleTests(unittest.TestCase):

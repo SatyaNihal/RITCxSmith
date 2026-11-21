@@ -9,6 +9,7 @@ All prices, positions and P&L here are from a **simulated market**.
 - **One ETF, two stocks, two currencies.** One unit of `RITC` holds one share of `BULL` and one share of `BEAR`. The stocks trade in CAD, the ETF in USD, and `USD` quotes CAD per US dollar. In equilibrium `RITC (USD) × USD/CAD = BULL + BEAR`, and the bot trades the gap when it is wider than fees.
 - **The best price is not the price you get.** Order books are finite. Selling 1,000 units walks down the bids, so every estimate here sweeps the book level by level instead of using the top quote.
 - **Tender offers are the trap.** An institution offers to buy or sell 80,000–100,000 ETF units at an attractive price, valid for about five seconds. Accepting is easy. The profit depends on getting back out, and a tender priced above the best ask can still lose money once you price buying all of it back through the book. The official starter code accepts every tender. This bot values the full exit first.
+- **Offsetting tenders.** During an unwind, the bot can accept a qualifying opposite offer that reduces its unhedged ETF position. A larger reversal can also qualify when the excess shares independently clear the exit costs or the stronger fair-value hurdle. The bot reconciles the current slice first and works the confirmed remainder back to the basket hedge target. When a price within the spread meets its unwind limit, it can rest a smaller order there.
 - **Position limits.** The ETF counts twice toward a gross/net limit, so the bot checks the limits after each leg of a trade could fill on its own, not just after the whole trade.
 
 ## Example (synthetic replay)
@@ -23,7 +24,7 @@ TRADE  ETF_RICH   300 units est +32.40 CAD (+0.1080/unit) after fees 20.10 and b
 ```
 
 - **Tender 1:** the institution pays 25.10 and the best ask is 25.00, so it looks like +USD 60. But only 200 units are offered at 25.00 and the next 400 cost 25.16, so buying back all 600 loses USD 4 before fees. The bot skips it.
-- **Tender 7:** the same tender is accepted against a deep book and skipped against a shallow one.
+- **Tender 7:** with a deep book, the bot accepts because an immediate exit pays. With a shallow book, an immediate exit would lose about CAD 8,200, but the tender is still 0.15 above the stocks' fair value, so it accepts on fair value and unwinds over time with limit orders. In heat 1 on competition day, that kind of paced unwind beat the immediate-exit estimate by about 3×.
 - **Basket trade:** sized to 300 units, because the next price level no longer covers the fees.
 
 On the competition's practice server, running read-only, the bot skipped a live 96,000-unit tender. Exiting through the book would have cost about CAD 35,000 more than the tender paid.

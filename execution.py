@@ -18,7 +18,7 @@ from typing import Any, Callable
 
 from etf_config import ETF, FX, StrategyConfig
 from rit_client import RitError, SubmissionUncertain
-from snapshot import Snapshot
+from snapshot import Snapshot, Tender
 from strategy import Decision, Leg, unwind_step
 
 ACTIVE, DONE, PAUSED = "ACTIVE", "DONE", "PAUSED"
@@ -101,7 +101,7 @@ class OrderDesk:
         self.log("order", order.text(), order=order.__dict__)
         return order
 
-    def refresh(self, order: TrackedOrder, snap: Snapshot) -> None:
+    def refresh(self, order: TrackedOrder, snap: Snapshot, *, cancel_now: bool = False) -> None:
         """Advance one unfinished order using the server's view."""
         if order.status == "UNCERTAIN":
             self._reconcile_uncertain(order, snap)
@@ -115,10 +115,10 @@ class OrderDesk:
             order.error = f"poll failed: {error}"
             return
         order.polls += 1
-        if not order.finished and order.polls >= self.cfg.order_poll_steps and not order.cancel_requested:
-            order.cancel_requested = True
+        if not order.finished and (cancel_now or order.polls >= self.cfg.order_poll_steps) and not order.cancel_requested:
             try:
                 self.client.cancel_order(order.order_id)
+                order.cancel_requested = True
             except RitError as error:
                 order.error = f"cancel failed: {error}"
         if order.finished:
@@ -234,7 +234,10 @@ class BasketPlan:
             if quantity <= 0:
                 self.filled[leg.ticker] = self._target(self.index)
                 continue
-            use_limit = self.cfg.use_limit_orders and leg.ticker != FX and leg.limit_price is not None
+            # Protect the entry price. Once exposed, complete a hedge at market
+            # if its first limit order missed, using only the unfilled quantity.
+            hedge_retry = self.index > 0 and self.attempts[leg.ticker] > 0
+            use_limit = self.cfg.use_limit_orders and leg.ticker != FX and leg.limit_price is not None and not hedge_retry
             self.attempts[leg.ticker] += 1
             self.current = self.desk.submit(
                 snap,
@@ -256,13 +259,11 @@ class TenderPlan:
         self.desk = desk
         self.cfg = cfg
         self.name = decision.name
-        self.tender_id = tender.tender_id
         self.price = tender.price
-        self.delta = float(decision.details["delta"])
         self.target = float(decision.details["target"])
-        self.position_before = snap.position(ETF)
-        self.phase = "ACCEPT"
-        self.confirm_steps = 0
+        self.expected_position = snap.position(ETF)
+        self.is_offset = False
+        self._set_offer(decision, tender, snap)
         self.last_progress_tick = snap.tick
         self.failures = 0
         self.current: TrackedOrder | None = None
@@ -270,17 +271,71 @@ class TenderPlan:
         self.reason = "started"
         self.note = ""
 
+    def _set_offer(self, decision: Decision, tender: Tender, snap: Snapshot) -> None:
+        self.offer = tender
+        self.delta = float(decision.details["delta"])
+        self.position_before = snap.position(ETF)
+        self.phase = "ACCEPT"
+        self.confirm_steps = 0
+        self.uncertain = False
+
+    def can_offset(self, decision: Decision, snap: Snapshot) -> bool:
+        if self.state != ACTIVE or self.phase != "UNWIND" or not decision.go:
+            return False
+        residual = snap.position(ETF) - self.target
+        delta = decision.details["delta"]
+        if decision.details["target"] != self.target or residual * delta >= 0:
+            return False
+        return abs(residual + delta) < abs(residual) or decision.details.get("reversal_eligible", False)
+
+    def try_offset(self, decision: Decision, tender: Tender, snap: Snapshot) -> bool:
+        """Yield the unwind to a qualifying offer. Re-price next snapshot after clearing a slice."""
+        if self._settle_slice(snap, cancel_now=True):
+            return False
+        if snap.position(ETF) != self.expected_position or any(o.ticker == ETF for o in snap.open_orders):
+            self.note = "waiting for RITC orders and position to reconcile before offset"
+            return False
+        self.is_offset = True
+        self._set_offer(decision, tender, snap)
+        self.desk.log("offset", f"submitting tender {tender.tender_id} against {self.position_before - self.target:+,.0f} RITC")
+        self.step(snap)
+        return True
+
+    def _offer_failed(self, reason: str) -> None:
+        if self.is_offset:
+            self.phase, self.note = "UNWIND", reason
+            self.desk.log("offset", f"tender {self.offer.tender_id}: {reason}; resuming previous unwind")
+        else:
+            self.state, self.reason = DONE, reason
+
+    def _settle_slice(self, snap: Snapshot, *, cancel_now: bool = False) -> bool:
+        order = self.current
+        if order is None:
+            return False
+        if not order.finished:
+            self.desk.refresh(order, snap, cancel_now=cancel_now)
+        if order.finished:
+            self.expected_position = order.position_before + _sign(order.action) * order.filled
+            if order.filled > 0:
+                self.last_progress_tick = snap.tick
+                self.failures = 0
+            elif order.status == "REJECTED":
+                self.failures += 1
+            self.current = None
+        return True
+
     def step(self, snap: Snapshot) -> None:
         if self.state != ACTIVE:
             return
         if self.phase == "ACCEPT":
             try:
-                self.desk.client.accept_tender(self.tender_id, self.price)
+                self.desk.client.accept_tender(self.offer.tender_id, self.offer.price)
                 self.note = "accepted; waiting for the position to change"
             except SubmissionUncertain:
+                self.uncertain = True
                 self.note = "accept may not have arrived; checking the position"
             except RitError as error:
-                self.state, self.reason = DONE, f"RIT refused the tender: {error}"
+                self._offer_failed(f"RIT refused the tender: {error}")
                 return
             self.phase = "CONFIRM"
             return
@@ -288,14 +343,20 @@ class TenderPlan:
         if self.phase == "CONFIRM":
             moved = snap.position(ETF) - self.position_before
             if abs(moved - self.delta) < 1:
+                self.expected_position = snap.position(ETF)
+                residual = self.expected_position - self.target
+                if self.is_offset:
+                    if residual * self.delta > 0:
+                        self.price = self.offer.price  # the excess opened inventory on the opposite side
+                    self.desk.log("offset", f"confirmed tender {self.offer.tender_id}; {residual:+,.0f} RITC left to unwind")
                 self.phase = "UNWIND"
+                self.failures = 0
                 self.last_progress_tick = snap.tick
                 self.note = f"position {snap.position(ETF):+,.0f}; unwinding to {self.target:+,.0f}"
             elif abs(moved) < 1:
                 self.confirm_steps += 1
-                if self.confirm_steps >= self.cfg.tender_confirm_steps:
-                    self.state = DONE
-                    self.reason = "tender never showed in the position; treating it as not accepted"
+                if self.confirm_steps >= self.cfg.tender_confirm_steps and (not self.uncertain or snap.tick > self.offer.expires):
+                    self._offer_failed("tender never showed in the position; treating it as not accepted")
                 return
             else:
                 self.state = PAUSED
@@ -303,18 +364,11 @@ class TenderPlan:
                 return
 
         # UNWIND
-        if self.current is not None and not self.current.finished:
-            self.desk.refresh(self.current, snap)
-            if not self.current.finished:
-                return
-        if self.current is not None:
-            if self.current.filled > 0:
-                self.last_progress_tick = snap.tick
-                self.failures = 0
-            elif self.current.status == "REJECTED":
-                self.failures += 1
-            self.current = None
-            return  # next slice uses a snapshot taken after this order finished
+        if self._settle_slice(snap):
+            return
+        if snap.position(ETF) != self.expected_position:
+            self.note = f"waiting for confirmed RITC position {self.expected_position:+,.0f}"
+            return
         if self.failures >= self.cfg.max_leg_attempts:
             self.state = PAUSED
             self.reason = f"unwind orders rejected {self.failures} times; RITC {snap.position(ETF):+,.0f}"

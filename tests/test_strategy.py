@@ -33,6 +33,7 @@ from tests.etf_helpers import (
 
 CFG = StrategyConfig()
 NO_MIN = replace(CFG, min_tender_profit_cad=0.0, min_tender_edge_per_unit_cad=0.0)
+NO_FAIR = replace(CFG, tender_fair_edge_min=None)  # immediate-full-exit rule only
 
 
 def practice_units(raw):
@@ -195,15 +196,58 @@ class TenderTests(unittest.TestCase):
         self.assertEqual(decision.legs[0].action, "BUY")
         self.assertEqual(decision.legs[0].quantity, 98_000)
 
-    def test_slide10_shallow_book_skips(self):
-        decision = self.evaluate(slide10_tender_raw([(25.08, 20_000), (25.20, 100_000)]))
+    def test_slide10_shallow_book_skips_on_immediate_exit(self):
+        decision = self.evaluate(slide10_tender_raw([(25.08, 20_000), (25.20, 100_000)]), NO_FAIR)
         self.assertFalse(decision.go)
         self.assertLess(decision.details["incremental_quote"], 0)
 
+    def test_slide10_shallow_book_accepts_on_fair_value(self):
+        # 25.15 is 0.15 above the stocks' fair value of 25.00, so the paced unwind gets it.
+        decision = self.evaluate(slide10_tender_raw([(25.08, 20_000), (25.20, 100_000)]))
+        self.assertTrue(decision.go, decision.reason)
+        self.assertTrue(decision.reason.startswith("fair value"), decision.reason)
+        self.assertIn("immediate full exit would make", decision.reason)
+        self.assertAlmostEqual(decision.details["fair_edge"], 0.15)
+        self.assertEqual(decision.details["delta"], -98_000)
+
     def test_insufficient_depth_skips(self):
-        decision = self.evaluate(slide10_tender_raw([(25.08, 20_000)]))
+        decision = self.evaluate(slide10_tender_raw([(25.08, 20_000)]), NO_FAIR)
         self.assertFalse(decision.go)
         self.assertIn("covers only 20,000 of 98,000", decision.reason)
+
+    def test_insufficient_depth_accepts_on_fair_value(self):
+        decision = self.evaluate(slide10_tender_raw([(25.08, 20_000)]))
+        self.assertTrue(decision.go, decision.reason)
+        self.assertIn("covers only 20,000 of 98,000", decision.reason)
+
+    def thin_bid_tender(self, price, tick=10):
+        """Live-like BUY tender: thin bids, fair value 25.00 from the stocks."""
+        books = standard_books(RITC=book([(24.84, 20_000), (24.70, 200_000)], [(24.86, DEEP)]))
+        return make_raw(
+            books=books,
+            tenders=[tender(9, "BUY", 91_000, price, expires=tick + 5, tick=tick)],
+            tick=tick,
+            gross_limit=300_000,
+            net_limit=200_000,
+        )
+
+    def test_fair_value_accepts_competition_style_tender(self):
+        decision = self.evaluate(self.thin_bid_tender(24.85))  # 0.15 below fair
+        self.assertTrue(decision.go, decision.reason)
+        self.assertTrue(decision.reason.startswith("fair value"), decision.reason)
+        self.assertEqual(decision.details["target"], 0)
+        self.assertGreater(decision.est_profit_cad, 0)
+
+    def test_fair_value_needs_enough_edge(self):
+        decision = self.evaluate(self.thin_bid_tender(24.92))  # only 0.08 below fair
+        self.assertFalse(decision.go)
+
+    def test_fair_value_needs_time_to_unwind(self):
+        decision = self.evaluate(self.thin_bid_tender(24.85, tick=270))  # 30 ticks left
+        self.assertFalse(decision.go)
+
+    def test_fair_value_path_can_be_turned_off(self):
+        self.assertFalse(self.evaluate(self.thin_bid_tender(24.85), NO_FAIR).go)
 
     def test_expired_tender_skips(self):
         decision = self.evaluate(make_raw(tenders=[tender(expires=9)], tick=10))
@@ -232,7 +276,7 @@ class TenderTests(unittest.TestCase):
     def test_cut_off_book_is_named_in_the_reason(self):
         raw = slide10_tender_raw([(25.08, 20_000), (25.10, 20_000)])
         raw["book_depth"] = 2
-        decision = self.evaluate(raw)
+        decision = self.evaluate(raw, NO_FAIR)
         self.assertFalse(decision.go)
         self.assertIn("raise book_depth", decision.reason)
 
@@ -280,6 +324,18 @@ class UnwindTests(unittest.TestCase):
         leg, why = unwind_step(self.snap([(25.05, 300), (24.90, 5000)]), 0, 25.00, 0, CFG)
         self.assertEqual((leg.action, leg.quantity, leg.limit_price), ("SELL", 300, 25.05))
         self.assertIn("limit 25.02", why)
+
+    def test_resting_unwind_quotes_both_sides_and_caps_slice(self):
+        books = standard_books(RITC=book([(24.90, DEEP)], [(25.20, DEEP)]))
+        for position, side, price in ((20_000, "SELL", 25.19), (-20_000, "BUY", 24.91)):
+            with self.subTest(side=side):
+                snap = make_snapshot(books=books, positions={"RITC": position})
+                leg, _ = unwind_step(snap, 0, 25.00, 3, CFG)
+                self.assertEqual((leg.action, leg.quantity, leg.limit_price), (side, 5000, price))
+
+    def test_resting_unwind_respects_original_floor(self):
+        leg, _ = unwind_step(self.snap([(24.80, 5000)]), 0, 25.50, 10, CFG)
+        self.assertIsNone(leg)
 
     def test_limit_relaxes_with_patience(self):
         cfg = replace(CFG, unwind_max_loss_per_unit=0.15)

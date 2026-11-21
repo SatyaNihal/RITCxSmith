@@ -35,6 +35,16 @@ class StrategyConfig:
     tender_buffer_per_unit_cad: float = 0.02    # allowance for prices moving while exiting
     min_ticks_to_tender_expiry: int = 1
     min_heat_ticks_left_for_tender: int = 5
+    # Fair-value path: also accept a tender whose price beats the stocks' fair value,
+    # (BULL + BEAR) / USD, by at least this much per unit (USD, on your side), even if
+    # the book can't absorb it all right now. The paced limit-order unwind works it off
+    # as the book refills. Competition day, heat 1: tender 1018's slow unwind earned
+    # +0.158/unit; skipped tenders 18 and 518 (+0.14 vs fair) would have earned about
+    # +0.04 and +0.10/unit over 20 ticks, while 1518 (+0.10) and 2018 (-0.08) would have lost.
+    # None turns the path off (immediate full exit required).
+    tender_fair_edge_min: float | None = 0.12
+    tender_fair_min_ticks_left: int = 40        # time to unwind ~90k units in slices
+    reversal_fair_edge_min: float = 0.18        # USD/unit for a larger position opened by an opposite tender
     # VERIFY in practice: True means a tender with action BUY makes *your* RITC
     # position go up. Compare with the RIT tender window before trading.
     tender_action_is_trader_side: bool = True
@@ -42,7 +52,7 @@ class StrategyConfig:
     # --- ETF vs basket arbitrage ---------------------------------------
     basket_min_edge_per_unit_cad: float = 0.02  # marginal edge after fees and buffer
     basket_buffer_per_unit_cad: float = 0.02
-    basket_max_qty: int = 1_000                 # start small; raise after practice
+    basket_max_qty: int = 3_000                 # capped further by executable depth and limits
     basket_lot: int = 100
     convert_fx: bool = True                     # convert the ETF leg's USD to CAD
 
@@ -58,11 +68,12 @@ class StrategyConfig:
     book_depth: int = 200                       # orders requested per book side (100 was hit on most practice snapshots)
 
     # --- Execution -----------------------------------------------------
-    use_limit_orders: bool = False              # basket legs as marketable limits
+    use_limit_orders: bool = True               # price-limit the first submission on each equity leg
     max_leg_attempts: int = 3
     order_poll_steps: int = 3                   # loops to wait for a fill before cancelling
     tender_confirm_steps: int = 6               # loops to wait for an accepted tender to show
-    unwind_slice_max: int = 5_000
+    unwind_slice_max: int = 10_000
+    unwind_passive_max: int = 5_000             # resting slice when the exit price lies within the spread
     unwind_stop_crossing_ticks: int = 5         # leave the rest to the end-of-heat close-out
     unwind_max_loss_per_unit: float = 0.05      # in the ETF's quote currency (USD)
     unwind_patience_ticks: int = 20             # ticks to relax the floor to the max loss

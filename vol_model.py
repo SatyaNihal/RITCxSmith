@@ -187,36 +187,72 @@ class VolNews:
 _NUMBER = r"(\d+(?:\.\d+)?)"
 _RANGE = re.compile(_NUMBER + r"\s*%?\s*(?:-|–|—|~|to|and)\s*" + _NUMBER + r"\s*%")
 _SINGLE = re.compile(_NUMBER + r"\s*%")
+_KEYWORD = re.compile(r"volatil|\brates?\b")
+_NEXT_WEEK = re.compile(r"\bnext\s+week\b")
+
+
+def _normalize(text: str) -> str:
+    return " ".join((text or "").lower().split())
+
+
+def _labelled_percentages(lowered: str) -> list[tuple[str, float, float, str]]:
+    """Each percentage (or range) left to right, labelled by the nearest keyword
+    before it: ("volatil" | "rate" | "", low, high, text before it).
+
+    Live news puts the rate first: "Risk free rate and current annualized
+    volatility of RTM. The current risk free rate is 0% and the current
+    annualized volatility is 25%". The 0% follows "rate"; the 25% follows
+    "volatility", so each number gets the right meaning.
+    """
+    tokens = []
+    position = 0
+    while True:
+        matches = [m for m in (_RANGE.search(lowered, position), _SINGLE.search(lowered, position)) if m]
+        if not matches:
+            return tokens
+        # Earliest match; at the same start, the longer one (a range beats its first number).
+        match = min(matches, key=lambda m: (m.start(), -(m.end() - m.start())))
+        if match.re is _RANGE:
+            low, high = sorted((float(match.group(1)), float(match.group(2))))
+        else:
+            low = high = float(match.group(1))
+        before = lowered[position:match.start()]
+        keywords = _KEYWORD.findall(before)
+        label = ("volatil" if keywords[-1].startswith("volatil") else "rate") if keywords else ""
+        tokens.append((label, low, high, before))
+        position = match.end()
 
 
 def parse_vol_news(text: str) -> VolNews | None:
-    """Parse a volatility news headline/body; None if it isn't one.
+    """Parse a volatility announcement; None if the text has no volatility figure.
 
-    Handles "...for this week will be 20%" and "...for next week will be
-    between 27-30%" (also 27% - 30%, 27~30%, 27–30%, 27 to 30%).
+    Handles the live format ("current annualized volatility is 25%", rate
+    mentioned first), "...for this week will be 20%" and "...for next week
+    will be between 27-30%" (also 27% - 30%, 27~30%, 27–30%, 27 to 30%).
+    A figure with no week stated is treated as the current one.
     """
-    if not text:
-        return None
-    lowered = " ".join(text.lower().split())
+    lowered = _normalize(text)
     if "volatil" not in lowered:
         return None
-    if re.search(r"\bnext\s+week\b", lowered):
-        kind = "next"
-    elif re.search(r"\b(this|current)\s+week\b", lowered):
-        kind = "current"
-    else:
-        return None
-    range_match = _RANGE.search(lowered)
-    if range_match:
-        low, high = sorted((float(range_match.group(1)), float(range_match.group(2))))
-    else:
-        single = _SINGLE.search(lowered)
-        if not single:
+    for label, low, high, before in _labelled_percentages(lowered):
+        if label != "volatil":
+            continue
+        if not (0 < low <= high < 500):
             return None
-        low = high = float(single.group(1))
-    if not (0 < low <= high < 500):
-        return None
-    return VolNews(kind, low / 100.0, high / 100.0)
+        names_current = re.search(r"\b(this|current)\b", lowered) is not None
+        is_next = _NEXT_WEEK.search(before) is not None or (
+            _NEXT_WEEK.search(lowered) is not None and not names_current
+        )
+        return VolNews("next" if is_next else "current", low / 100.0, high / 100.0)
+    return None
+
+
+def parse_rate_news(text: str) -> float | None:
+    """Risk-free rate as a decimal from a news item ("risk free rate is 0%" -> 0.0), else None."""
+    for label, low, _, _ in _labelled_percentages(_normalize(text)):
+        if label == "rate":
+            return low / 100.0
+    return None
 
 
 # ---------------------------------------------------------------- vol schedule

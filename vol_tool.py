@@ -62,10 +62,18 @@ def _contract_multiplier(security: Mapping) -> float:
 class Dashboard:
     """Polls RIT (read-only) and renders one text screen per refresh."""
 
-    def __init__(self, client: Any, *, min_edge: float = 0.0, warn_band: float = vm.DEFAULT_WARN_BAND):
+    def __init__(
+        self,
+        client: Any,
+        *,
+        min_edge: float = 0.0,
+        warn_band: float = vm.DEFAULT_WARN_BAND,
+        fixed_vol: float | None = None,
+    ):
         self.client = client
         self.min_edge = min_edge
         self.warn_band = warn_band
+        self.fixed_vol = fixed_vol  # --vol: overrides the news-based forecast
         self.total_ticks = vm.TOTAL_TICKS
         self._reset(None)
 
@@ -79,6 +87,7 @@ class Dashboard:
             ticks_per_week=max(1, self.total_ticks // 4), total_ticks=self.total_ticks
         )
         self.headlines: list[str] = []
+        self.news_rate: float | None = None
 
     def _sync_case(self, case: Mapping) -> int:
         tick = int(_num(case.get("tick")) or 0)
@@ -105,13 +114,18 @@ class Dashboard:
             text = " ".join(str(item.get(key) or "") for key in ("headline", "body")).strip()
             tick = int(_num(item.get("tick")) or 0)
             parsed = vm.parse_vol_news(text)
-            if parsed is None:
-                note = ""
-            else:
+            rate = vm.parse_rate_news(text)
+            notes = []
+            if parsed is not None:
                 week = self.schedule.apply(parsed, tick)
-                vols = f"{parsed.low:.0%}-{parsed.high:.0%}" if parsed.is_range else f"{parsed.value:.0%}"
-                note = f"  -> wk{week} {parsed.kind} {vols}"
-            self.headlines.append(f"t{tick}: {' '.join(text.split())[:70]}{note}")
+                vols = f"{parsed.low:.1%}-{parsed.high:.1%}" if parsed.is_range else f"{parsed.value:.1%}"
+                notes.append(f"wk{week} {parsed.kind} vol {vols}")
+            if rate is not None:
+                self.news_rate = rate
+                notes.append(f"r {rate:.2%}")
+            note = f" [{', '.join(notes)}]" if notes else " [not parsed]"
+            line = f"t{tick}{note}: {' '.join(text.split())}"
+            self.headlines.append(line if len(line) <= 114 else line[:111] + "...")
         self.headlines = self.headlines[-NEWS_LINES:]
 
     # -- polling --------------------------------------------------------
@@ -119,11 +133,15 @@ class Dashboard:
     def refresh(self, now: datetime | None = None) -> str:
         case = self.client.case()
         tick = self._sync_case(case)
-        if self.last_news_id is None:
-            news = self.client.news(limit=100)
-        else:
-            news = self.client.news(after=self.last_news_id)
-        self.ingest_news(news)
+        # Rebuild from the full news list on every refresh, keeping only items up to the
+        # current tick. Between heats the server still lists the previous heat's news, and
+        # news ids restart each heat, so incremental `after=` reads go stale (seen live).
+        news = self.client.news(limit=100) or []
+        self.schedule = vm.VolSchedule(ticks_per_week=max(1, self.total_ticks // 4), total_ticks=self.total_ticks)
+        self.headlines = []
+        self.news_rate = None
+        self.last_news_id = None
+        self.ingest_news([item for item in news if (_num(item.get("tick")) or 0) <= tick])
         status = case.get("status")
         if status != "ACTIVE":
             return "\n".join([
@@ -168,9 +186,9 @@ class Dashboard:
             return "\n".join(lines + self._news_lines())
 
         ticks_per_year = 12 * self.total_ticks
-        r = vm.rate_from_securities(securities)
+        r = self.news_rate if self.news_rate is not None else vm.rate_from_securities(securities)
         t = vm.years_to_expiry(tick, self.total_ticks, ticks_per_year)
-        sigma = self.schedule.forecast(tick)
+        sigma = self.fixed_vol if self.fixed_vol is not None else self.schedule.forecast(tick)
         positions = {ticker: _num(sec.get("position")) or 0.0 for ticker, sec in by_ticker.items()}
         option_secs = {ticker: sec for ticker, sec in by_ticker.items() if vm.parse_option_ticker(ticker)}
         multipliers = {ticker: _contract_multiplier(sec) for ticker, sec in option_secs.items()}
@@ -180,7 +198,12 @@ class Dashboard:
             f"mid {s:.3f} | pos {positions.get(vm.UNDERLYING, 0):+,.0f} | r {r:.2%} | T {t:.4f}y"
         )
         if sigma is None:
-            lines.append("Forecast vol: no volatility news parsed yet. Fair values and signals need it.")
+            lines.append(
+                "Forecast vol: no volatility news parsed yet. Fair values need it: "
+                "restart with --vol 25 (the announced %) as a fallback."
+            )
+        elif self.fixed_vol is not None:
+            lines.append(f"Forecast vol {sigma:.2%}  (set by --vol; news ignored)")
         else:
             lines.append(f"Forecast vol {sigma:.2%}  ({self.schedule.describe(tick)})")
 
@@ -314,12 +337,18 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--min-edge", type=float, default=0.0, help="minimum $ per contract after fees to flag a signal")
     parser.add_argument("--warn-band", type=float, default=vm.DEFAULT_WARN_BAND, help="internal |delta| warning band")
     parser.add_argument("--no-clear", action="store_true", help="don't clear the screen between refreshes")
+    parser.add_argument(
+        "--vol", type=float, help="fallback: use this annualized vol (25 or 0.25) instead of parsing news"
+    )
     args = parser.parse_args(argv)
+    fixed_vol = None
+    if args.vol is not None:
+        fixed_vol = args.vol / 100.0 if args.vol > 1 else args.vol
 
     print(f"Read-only Volatility dashboard: http://{args.host}:{args.port}/v1")
     credentials = prompt_credentials()
     client = RitClient(credentials, args.port, args.host, execute=False)
-    dashboard = Dashboard(client, min_edge=args.min_edge, warn_band=args.warn_band)
+    dashboard = Dashboard(client, min_edge=args.min_edge, warn_band=args.warn_band, fixed_vol=fixed_vol)
     try:
         run(dashboard, max(args.refresh, 0.2), clear=not args.no_clear and sys.stdout.isatty())
     except KeyboardInterrupt:

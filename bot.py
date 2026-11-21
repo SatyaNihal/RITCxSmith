@@ -23,7 +23,7 @@ from pathlib import Path
 from typing import Any
 
 from etf_config import DEFAULT_CONFIG, TICKERS, StrategyConfig
-from execution import Executor
+from execution import Executor, TenderPlan
 from rit_client import (
     DEFAULT_HOST,
     PRACTICE_PORTS,
@@ -197,20 +197,22 @@ class Bot:
         if status != "ACTIVE":
             self.out(f"  note: case is {status}; decisions below are informational")
 
+        tender_handled = self._handle_tenders(snap, live=status == "ACTIVE")
         if self.executor is not None:
-            self.executor.step(snap)
+            if not tender_handled and status == "ACTIVE":
+                self.executor.step(snap)
             text = self.executor.status_text()
             if text != "idle" and text != self.last_status_print:
                 self.out(f"  plan: {text}")
                 self.last_status_print = text
 
-        self._handle_tenders(snap, live=status == "ACTIVE")
-        self._handle_basket(snap, live=status == "ACTIVE")
+        self._handle_basket(snap, live=status == "ACTIVE" and not tender_handled)
         return False
 
     # -- decisions ---------------------------------------------------------------
 
-    def _handle_tenders(self, snap: Snapshot, live: bool) -> None:
+    def _handle_tenders(self, snap: Snapshot, live: bool) -> bool:
+        handled = False
         for tender in snap.tenders:
             decision = evaluate_tender(tender, snap, self.cfg)
             first_time = tender.tender_id not in self.tender_verbs
@@ -225,16 +227,26 @@ class Bot:
                 self.out(f"  {decision.summary()}")
                 self._record({"event": "decision", **decision.to_dict(), "tender": tender.__dict__})
             self.tender_verbs[tender.tender_id] = decision.verb
-            if not decision.go or tender.tender_id in self.acted_tenders or not live:
+            if not decision.go or tender.tender_id in self.acted_tenders or not live or handled:
                 continue
             self.stats["tenders_accept_signals"] += 1
             if self.executor is None:
                 self.out(f"  [dry run] would accept tender {tender.tender_id}")
                 self.acted_tenders.add(tender.tender_id)
-            elif self.executor.can_start():
+            else:
+                plan = self.executor.plan
+                if self.executor.can_start():
+                    self.executor.start_tender(decision, tender, snap)
+                elif isinstance(plan, TenderPlan) and plan.can_offset(decision, snap):
+                    handled = True
+                    if not plan.try_offset(decision, tender, snap):
+                        continue
+                else:
+                    continue
+                handled = True
                 self.acted_tenders.add(tender.tender_id)
                 self.stats["tenders_started"] += 1
-                self.executor.start_tender(decision, tender, snap)
+        return handled
 
     def _handle_basket(self, snap: Snapshot, live: bool) -> None:
         for direction in (RICH, CHEAP):
@@ -358,8 +370,10 @@ def main(argv: list[str] | None = None) -> int:
 
     signal.signal(signal.SIGINT, request_stop)
     code = 0
+    preflight_passed = False
     try:
-        if not bot.preflight():
+        preflight_passed = bot.preflight()
+        if not preflight_passed:
             return 1
         bot.run(once=args.once, max_loops=args.max_loops)
     except AuthError as error:
@@ -367,7 +381,7 @@ def main(argv: list[str] | None = None) -> int:
         code = 1
     finally:
         try:
-            if not args.once:
+            if preflight_passed and not args.once:
                 bot.shutdown()
         except RitError as error:
             print(f"Stop procedure hit an API error: {error}. Check RIT for open orders and positions.")
