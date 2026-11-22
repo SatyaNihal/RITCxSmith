@@ -4,6 +4,14 @@ A Python trading bot for the Algorithmic ETF Arbitrage case of **RITCxSmith 2026
 
 All prices, positions and P&L here are from a **simulated market**.
 
+## Competition result
+
+Team 19 placed first in a Rotman Algorithmic ETF Arbitrage heat at RITCxSmith 2026 with **CAD 109.8K in simulated profit and zero fines**.
+
+[![Watch Team 19's ETF heat video](assets/team-19-etf-heat-preview.jpg)](assets/team-19-etf-heat-win.mp4?raw=true)
+
+[View the post on X](https://x.com/KodukulaNihal/status/2124216934434537907)
+
 ## The problem
 
 - **One ETF, two stocks, two currencies.** One unit of `RITC` holds one share of `BULL` and one share of `BEAR`. The stocks trade in CAD, the ETF in USD, and `USD` quotes CAD per US dollar. In equilibrium `RITC (USD) × USD/CAD = BULL + BEAR`, and the bot trades the gap when it is wider than fees.
@@ -63,7 +71,7 @@ Press Ctrl+C to stop. The bot stops sending orders, cancels open orders, then pr
 
 ## Status
 
-As of November 17, 2026, the bot runs in dry-run mode against the practice server, and its logged decisions have been checked against the arithmetic by hand. Execution mode is tested offline against a simulated server only.
+The bot traded in execution mode on the RITCxSmith competition simulator on November 21, 2026. Offline tests exercise the strategy and order handling with synthetic market data.
 
 ## Credits
 
