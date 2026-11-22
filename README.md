@@ -4,13 +4,17 @@ A Python trading bot for the Algorithmic ETF Arbitrage case of **RITCxSmith 2026
 
 All prices, positions and P&L here are from a **simulated market**.
 
+
 ## Competition result
 
 Team 19 placed first in a Rotman Algorithmic ETF Arbitrage heat at RITCxSmith 2026 with **CAD 109.8K in simulated profit and zero fines**.
 
-[![Watch Team 19's ETF heat video](assets/team-19-etf-heat-preview.jpg)](assets/team-19-etf-heat-win.mp4?raw=true)
+### Watch the competition footage
+
+https://github.com/user-attachments/assets/3491e5b8-3bf7-4e70-a0e3-3a142f402160
 
 [View the post on X](https://x.com/KodukulaNihal/status/2124216934434537907)
+
 
 ## The problem
 
