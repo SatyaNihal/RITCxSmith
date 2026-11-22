@@ -9,12 +9,13 @@ All prices, positions and P&L here are from a **simulated market**.
 
 Team 19 placed first in a Rotman Algorithmic ETF Arbitrage heat at RITCxSmith 2026 with **CAD 109.8K in simulated profit and zero fines**.
 
+[View ETF Heat Win post on X](https://x.com/KodukulaNihal/status/2124216934434537907)
+
+[View the $109.8K Volatility Heat on X](https://x.com/KodukulaNihal/status/2124194324124496283/photo/1)
+
 ### Watch the competition footage
 
 https://github.com/user-attachments/assets/3491e5b8-3bf7-4e70-a0e3-3a142f402160
-
-[View the post on X](https://x.com/KodukulaNihal/status/2124216934434537907)
-
 
 ## The problem
 
